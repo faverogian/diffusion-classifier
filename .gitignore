@@ -1,0 +1,11 @@
+# venv311
+venv311/
+
+# png
+*.png
+
+# checkpoints
+checkpoints/
+
+# cache
+*.pyc
