@@ -30,6 +30,11 @@ export COMET_WORKSPACE=""               # (str) Comet workspace
 export COMET_EXPERIMENT_NAME="cifar10"  # (str) Comet experiment name
 export COMET_API_KEY=""                 # (str) Comet API key
 
+export CLASSIFICATION=true              # (bool) Whether to perform classification or not
+export N_STAGES=2                       # (int) Number of stages for the classification
+export EVALUATION_PER_STAGE=[50,500]    # (list) Number of samples to evaluate per stage
+export N_KEEP_PER_STAGE=[5,1]           # (list) Number of classes to keep per stage (Must end with 1)
+
 export INFERENCE_CONFIG="{
   \"project_root\": \"$PROJECT_ROOT\",
   \"experiment_dir\": \"$EXPERIMENT_DIR\",
@@ -56,7 +61,11 @@ export INFERENCE_CONFIG="{
   \"comet_project_name\": \"$COMET_PROJECT_NAME\",
   \"comet_workspace\": \"$COMET_WORKSPACE\",
   \"comet_experiment_name\": \"$COMET_EXPERIMENT_NAME\",
-  \"comet_api_key\": \"$COMET_API_KEY\"
+  \"comet_api_key\": \"$COMET_API_KEY\",
+  \"classification\": $CLASSIFICATION,
+  \"n_stages\": $N_STAGES,
+  \"evaluation_per_stage\": $EVALUATION_PER_STAGE,
+  \"n_keep_per_stage\": $N_KEEP_PER_STAGE
 }"
 
 # Run the Python script

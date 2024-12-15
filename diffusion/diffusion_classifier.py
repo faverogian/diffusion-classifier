@@ -496,6 +496,7 @@ class DiffusionClassifier(nn.Module):
         val_dataloader, 
         stop_idx=None,
         metrics=None,
+        classification=False
     ):
         """
         A function to evaluate the model.
@@ -518,12 +519,19 @@ class DiffusionClassifier(nn.Module):
 
             x = batch["images"]
             p = batch["prompt"] if "prompt" in batch.keys() else None
-            sample = self.sample(x, p)
+            if classification:
+                sample = self.classify(x, p)
+                # Update the metrics
+                if metrics is not None:
+                    for metric in metrics:
+                        metric.update((sample, p))
+            else:
+                sample = self.sample(x, p)
             
-            # Update the metrics
-            if metrics is not None:
-                for metric in metrics:
-                    metric.update((sample, batch))
+                # Update the metrics
+                if metrics is not None:
+                    for metric in metrics:
+                        metric.update((sample, batch))
 
             val_samples.append(sample)
             batches.append(batch)
@@ -544,6 +552,7 @@ class DiffusionClassifier(nn.Module):
         lr_scheduler, 
         metrics=None,
         plot_function=None,
+        classification=False
     ):
         """
         A function to perform inference.
@@ -581,7 +590,8 @@ class DiffusionClassifier(nn.Module):
         val_samples, batches, metrics = self.evaluate(
                                             val_dataloader, 
                                             metrics=metrics,
-                                            stop_idx=self.config.evaluation_batches
+                                            stop_idx=self.config.evaluation_batches,
+                                            classification=classification
                                         )
         
         metric_output = []
@@ -591,7 +601,7 @@ class DiffusionClassifier(nn.Module):
                 metric_output.append(metric.get_output())
 
         # Use the provided plot_function to plot the samples
-        if plot_function is not None:
+        if plot_function is not None and not classification:
             image_path = plot_function(
                 output_dir=inference_image_path,
                 batches=batches,
@@ -604,8 +614,65 @@ class DiffusionClassifier(nn.Module):
     
     @torch.no_grad()
     def classify(self, x, text=None):
-        # TODO - Implement classification as an evaluation method
-        pass
+        assert self.encoder is not None, "Encoder must be provided for classification."
+        assert len(self.config.evaluation_per_stage) == self.config.n_stages, "Number of evaluations per stage must match the number of stages."
+        assert len(self.config.n_keep_per_stage) == self.config.n_stages, "Number of classes to keep per stage must match the number of stages."
+        assert self.config.n_keep_per_stage[-1] == 1, "Only one class should be selected at the end of the classification process."
+
+        evaluation_per_stage = [0] + self.config.evaluation_per_stage
+
+        BS = x.shape[0]
+
+        errors = torch.full((BS, self.config.classes, evaluation_per_stage[-1]), torch.inf).to(x.device) # Store the errors for each class Originally set to 10000. 
+
+        classes = torch.arange(self.config.classes).repeat(BS, 1).to(x.device) # of shape (BS, classes)
+        
+        for i in range(self.config.n_stages):
+            # Get the start and end indices for the current stage
+            stage_start = evaluation_per_stage[i]
+            stage_end = evaluation_per_stage[i + 1]
+
+            for j in range(stage_start, stage_end):
+                # Sampling timepoint t and image at time t
+                t = torch.rand(BS)
+                logsnr_t = self.schedule(t).to(x.device)
+                alpha_t = torch.sqrt(torch.sigmoid(logsnr_t)).view(-1, 1, 1, 1).to(x.device)
+                sigma_t = torch.sqrt(torch.sigmoid(-logsnr_t)).view(-1, 1, 1, 1).to(x.device)
+                z_t, eps_t = self.diffuse(x, alpha_t, sigma_t)
+
+                # Get the errors for each class
+                for c in range(classes.shape[1]):
+                    text = classes[:, c]
+                    text_embeddings = self.encode_text_prompt(text)
+                    text_embeddings = text_embeddings.to(x.device)
+
+                    pred = self.model(
+                        x=z_t, 
+                        noise_labels=logsnr_t,
+                        encoder_hidden_states=text_embeddings,
+                        )
+                    
+                    if self.pred_param == 'v':
+                        eps_pred = sigma_t * z_t + alpha_t * pred
+                    else: 
+                        eps_pred = pred
+
+                    error_c = torch.norm((eps_pred - eps_t).view(BS, -1), dim=1, p=2)**2
+
+                    batch_indices = torch.arange(BS, device=x.device)
+                    errors[batch_indices, classes[:, c], j] = error_c
+                    
+            
+            # Keep the best errors
+            num_keep = self.config.n_keep_per_stage[i]
+            end_of_stage_errors = errors[:, :, :stage_end].mean(dim=2) # Average the errors until now
+            _, keep_indices = torch.topk(end_of_stage_errors, num_keep, dim=1, largest=False) # Keep the classes with the lowest errors
+            classes = keep_indices # of shape (BS, num_keep): The indices of the classes to keep
+        
+        assert classes.shape[1] == 1, "Only one class should be selected at the end of the classification process."
+
+        return classes[:, 0]
+
     
     def save_checkpoint(self, accelerator: Accelerator, epoch, metrics, experiment):
         """

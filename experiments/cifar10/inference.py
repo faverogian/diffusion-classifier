@@ -18,6 +18,7 @@ from diffusion.diffusion_classifier import DiffusionClassifier
 import torch
 from diffusers.optimization import get_cosine_schedule_with_warmup
 import accelerate
+from utils.metrics import Accuracy
 
 # Inference configuration
 class InferenceConfig:
@@ -129,14 +130,16 @@ def main():
     )
 
     # Train the model
-    diffusion_classifier.inference(
+    merics, _, _ = diffusion_classifier.inference(
         train_dataloader=train_loader,
         val_dataloader=test_loader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        metrics=None,
-        plot_function=cifar_plotter
+        metrics=[Accuracy("accuracy")],
+        plot_function=cifar_plotter,
+        classification=config.classification,
     )
+    print(merics)
 
 if __name__ == "__main__":
     main()
