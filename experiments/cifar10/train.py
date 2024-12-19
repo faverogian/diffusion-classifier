@@ -13,6 +13,7 @@ os.chdir(projectroot)
 from nets.unet import UNetCondition2D
 from dataset.cifar import CIFAR10DataLoader
 from diffusion.diffusion_classifier import DiffusionClassifier
+from utils.metrics import Accuracy
 
 # Third party imports
 import torch
@@ -123,7 +124,7 @@ def main():
         val_dataloader=test_loader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        metrics=None,
+        metrics=[Accuracy("classification accuracy")],
         plot_function=cifar_plotter
     )
 

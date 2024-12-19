@@ -31,7 +31,14 @@ export COMET_WORKSPACE=""               # (str) Comet workspace
 export COMET_EXPERIMENT_NAME="cifar10"  # (str) Comet experiment name
 export COMET_API_KEY=""                 # (str) Comet API key
 
-export RESUME=1
+export CLASSIFICATION=true              # (bool) Whether to perform classification or not
+export FAST_CLASSIFICATION=true         # (bool) Whether to perform fast classification or not
+export N_FAST_CLASSES=3                 # (int) Number of classes to keep for fast classification
+export N_STAGES=1                       # (int) Number of stages for the classification
+export EVALUATION_PER_STAGE=[1]    # (list) Number of samples to evaluate per stage
+export N_KEEP_PER_STAGE=[1]           # (list) Number of classes to keep per stage (Must end with 1)
+
+export RESUME=0
 
 export TRAINING_CONFIG="{
   \"resume\": $RESUME,
@@ -61,7 +68,13 @@ export TRAINING_CONFIG="{
   \"comet_project_name\": \"$COMET_PROJECT_NAME\",
   \"comet_workspace\": \"$COMET_WORKSPACE\",
   \"comet_experiment_name\": \"$COMET_EXPERIMENT_NAME\",
-  \"comet_api_key\": \"$COMET_API_KEY\"
+  \"comet_api_key\": \"$COMET_API_KEY\",
+  \"classification\": $CLASSIFICATION,
+  \"n_stages\": $N_STAGES,
+  \"evaluation_per_stage\": $EVALUATION_PER_STAGE,
+  \"n_keep_per_stage\": $N_KEEP_PER_STAGE,
+  \"fast_classification\": $FAST_CLASSIFICATION,
+  \"n_fast_classes\": $N_FAST_CLASSES
 }"
 
 # Run the Python script

@@ -395,8 +395,8 @@ class DiffusionClassifier(nn.Module):
                     workspace=self.config.comet_workspace,
                 )
                 experiment.set_name(self.config.comet_experiment_name)
-                experiment.log_asset(os.path.join(self.config.experiment_path, 'scripts/train_diffclassifier.py'), 'train_diffclassifier.py')
-                experiment.log_asset(os.path.join(self.config.project_root, 'scripts/train_diffclassifier.sh'), 'train_diffclassifier.sh')
+                experiment.log_asset(os.path.join(self.config.experiment_path, 'train.py'), 'train.py')
+                experiment.log_asset(os.path.join(self.config.project_root, 'train.sh'), 'train.sh')
                 experiment.log_other("GPU Model", torch.cuda.get_device_name(0))
                 experiment.log_other("Python Version", sys.version)
             start_epoch = 0
@@ -455,10 +455,18 @@ class DiffusionClassifier(nn.Module):
                 # Make directory for saving images
                 training_images_path = os.path.join(self.config.experiment_path, "training_images/")
 
-                val_samples, batches, metrics = self.evaluate(
+                # TODO: cleanup and consider multiple metrics
+                val_samples, batches, _ = self.evaluate(
+                                                    val_dataloader, 
+                                                    stop_idx=self.config.evaluation_batches,
+                                                    metrics=None,
+                                                )
+                
+                _, _, metrics = self.evaluate(
                                                     val_dataloader, 
                                                     stop_idx=self.config.evaluation_batches,
                                                     metrics=metrics,
+                                                    classification=True
                                                 )
                 
                 # Use the provided plot_function to plot the samples
@@ -477,6 +485,8 @@ class DiffusionClassifier(nn.Module):
                         metric_output = metric.get_output()
                         if experiment is not None and accelerator.is_main_process:
                             print(metric_output)
+                            base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
+                            print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
                             metric_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
                             experiment.log_metrics(metric_output, step=epoch)
                             experiment.log_image(name=f"Sample at epoch {epoch}", image_data=image_path)
@@ -519,19 +529,13 @@ class DiffusionClassifier(nn.Module):
 
             x = batch["images"]
             p = batch["prompt"] if "prompt" in batch.keys() else None
-            if classification:
-                sample = self.classify(x, p)
-                # Update the metrics
-                if metrics is not None:
-                    for metric in metrics:
-                        metric.update((sample, p))
-            else:
-                sample = self.sample(x, p)
             
-                # Update the metrics
-                if metrics is not None:
-                    for metric in metrics:
-                        metric.update((sample, batch))
+            sample = self.classify(x, p, fast=self.config.fast_classification) if classification else self.sample(x, p)
+                        
+            # Update the metrics
+            if metrics is not None:
+                for metric in metrics:
+                    metric.update((sample, batch))
 
             val_samples.append(sample)
             batches.append(batch)
@@ -613,11 +617,12 @@ class DiffusionClassifier(nn.Module):
         return (metric_output, val_samples, batches) if metrics is not None else (val_samples, batches)
     
     @torch.no_grad()
-    def classify(self, x, text=None):
+    def classify(self, x, text=None, fast=False):
         assert self.encoder is not None, "Encoder must be provided for classification."
         assert len(self.config.evaluation_per_stage) == self.config.n_stages, "Number of evaluations per stage must match the number of stages."
         assert len(self.config.n_keep_per_stage) == self.config.n_stages, "Number of classes to keep per stage must match the number of stages."
         assert self.config.n_keep_per_stage[-1] == 1, "Only one class should be selected at the end of the classification process."
+        assert self.config.n_fast_classes <= self.config.classes and self.config.n_fast_classes >=2, "Number of fast classes must be less than or equal to the total number of classes. Must be at least 2."
 
         evaluation_per_stage = [0] + self.config.evaluation_per_stage
 
@@ -625,7 +630,15 @@ class DiffusionClassifier(nn.Module):
 
         errors = torch.full((BS, self.config.classes, evaluation_per_stage[-1]), torch.inf).to(x.device) # Store the errors for each class Originally set to 10000. 
 
-        classes = torch.arange(self.config.classes).repeat(BS, 1).to(x.device) # of shape (BS, classes)
+        if fast:
+            text = text.view(-1, 1)
+            classes = torch.arange(self.config.classes).repeat(BS, 1).to(x.device)
+            mask = classes == text
+            incorrect_classes = classes[mask==False].view(BS, -1)
+            select_indices = torch.randint(0, incorrect_classes.shape[1], (BS, self.config.n_fast_classes-1)).to(x.device)
+            classes = torch.cat((text, torch.gather(incorrect_classes, 1, select_indices)), dim=1)  
+        else:
+            classes = torch.arange(self.config.classes).repeat(BS, 1).to(x.device) # of shape (BS, classes)
         
         for i in range(self.config.n_stages):
             # Get the start and end indices for the current stage

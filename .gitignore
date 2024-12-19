@@ -5,7 +5,7 @@ venv311/
 *.png
 
 # checkpoints
-checkpoints/
+**/checkpoints*/
 
 # cache
 *.pyc
