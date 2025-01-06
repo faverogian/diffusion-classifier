@@ -484,12 +484,12 @@ class DiffusionClassifier(nn.Module):
                         metric.sync_across_processes(accelerator)
                         metric_output = metric.get_output()
                         if experiment is not None and accelerator.is_main_process:
-                            print(metric_output)
-                            base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
-                            print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
                             metric_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
                             experiment.log_metrics(metric_output, step=epoch)
                             experiment.log_image(name=f"Sample at epoch {epoch}", image_data=image_path)
+                        base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
+                        print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
+                        print(metric_output)
                         metric.reset()
                 
                 val_evaluation_elapsed = time.time() - val_evaluation_start_time

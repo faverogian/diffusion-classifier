@@ -76,7 +76,7 @@ class IPMSADataset(torch.utils.data.Dataset):
         if slurm:
             self.rootdir_dict = {'MRI_AND_LABEL': os.environ['TMPDIR'], 'CLINICAL': os.environ['TMPDIR']}
         else:   
-            self.rootdir_dict = dictionary['rootdir_dict']
+            self.rootdir_dict = {'MRI_AND_LABEL': os.environ['DATA_PATH'], 'CLINICAL': os.environ['DATA_PATH']}
         self.dataset_dict = dictionary['dataset_dict']
         self.item_template = dictionary['item_template']
         self.sample_keys = list(self.dataset_dict.keys())
