@@ -1,5 +1,5 @@
 # venv311
-venv311/
+venv*/
 
 # png
 *.png
@@ -9,3 +9,6 @@ venv311/
 
 # cache
 *.pyc
+
+# logs
+**/logs*/

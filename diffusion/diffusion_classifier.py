@@ -66,11 +66,11 @@ class DiffusionClassifier(nn.Module):
             self.tokenizer = T5Tokenizer.from_pretrained("t5-base")
             self.null_token = self.tokenizer.pad_token_id
         elif self.encoder_type == 'nn':
-            classes = self.config.classes
+            classes = self.config.classes+1
             embedding_dim = unet.config.encoder_hid_dim
             self.encoder = nn.Embedding(classes, embedding_dim)
             self.tokenizer = None  # Not required for embeddings
-            self.null_token = classes - 1  # Placeholder for null token
+            self.null_token = self.config.classes  # Placeholder for null token
 
         # Lock the parameters of the encoder - Disable for end-to-end training
         if self.encoder in ['t5']:
