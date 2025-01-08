@@ -17,7 +17,7 @@ def log(t, eps = 1e-20):
 class DiffusionClassifier(nn.Module):
     def __init__(
         self, 
-        unet: nn.Module,
+        backbone: nn.Module,
         config: dict,
     ):
         super().__init__()
@@ -44,19 +44,8 @@ class DiffusionClassifier(nn.Module):
         self.cfg_w = self.config.cfg_w
 
         # Model
-        assert isinstance(unet, nn.Module), "Model must be an instance of torch.nn.Module."
-        self.model = unet
-
-        # Exponential moving average
-        #self.ema = EMA(
-        #    self.model,
-        #    beta=0.9999,
-        #    update_after_step=100,
-        #    update_every=10
-        #)
-
-        # Lock the parameters of the UNet - Disable for end-to-end training
-        # self.model.requires_grad_(False)
+        assert isinstance(backbone, nn.Module), "Model must be an instance of torch.nn.Module."
+        self.model = backbone
 
         # Optional encoder setup
         self.encoder_type = self.config.encoder_type
@@ -67,13 +56,17 @@ class DiffusionClassifier(nn.Module):
             self.null_token = self.tokenizer.pad_token_id
         elif self.encoder_type == 'nn':
             classes = self.config.classes+1
-            embedding_dim = unet.config.encoder_hid_dim
+            embedding_dim = backbone.config.encoder_hid_dim
             self.encoder = nn.Embedding(classes, embedding_dim)
             self.tokenizer = None  # Not required for embeddings
             self.null_token = self.config.classes  # Placeholder for null token
+        elif self.encoder_type == 'DiT':
+            self.tokenizer = None
+            self.encoder = None
+            self.null_token = self.config.classes  # Placeholder for null token
 
         # Lock the parameters of the encoder - Disable for end-to-end training
-        if self.encoder in ['t5']:
+        if self.encoder_type in ['t5']:
             self.encoder.requires_grad_(False)
 
     def encode_text_prompt(self, text):
@@ -83,6 +76,10 @@ class DiffusionClassifier(nn.Module):
         if self.encoder_type == 'nn':
             embeddings = self.encoder(text)
             embeddings.unsqueeze_(1)
+        elif self.encoder_type == 'DiT':
+            # Leave class labels as they are
+            embeddings = text
+            print(embeddings.shape)
         else:
             inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
             inputs.to(self.encoder.device)
@@ -296,7 +293,7 @@ class DiffusionClassifier(nn.Module):
         """
         t = torch.rand(x.shape[0])
 
-        if text is not None and self.encoder is not None:
+        if text is not None and self.encoder_type is not None:
             text_embeddings = self.encode_text_prompt(text)
             text_embeddings = text_embeddings.to(x.device)
         else:
@@ -367,7 +364,7 @@ class DiffusionClassifier(nn.Module):
         )
         
         # Prepare the model, optimizer, dataloaders, and learning rate scheduler
-        unet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
+        model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
             self.model, optimizer, train_dataloader, val_dataloader, lr_scheduler
         )
         if self.encoder_type == 'nn': # Learnable embeddings require separate preparation than pretrained models
@@ -408,11 +405,11 @@ class DiffusionClassifier(nn.Module):
         for epoch in range(start_epoch, self.config.num_epochs):
             epoch_start_time = time.time()
 
-            unet.train()
+            model.train()
 
             for _, batch in enumerate(train_dataloader):
 
-                with accelerator.accumulate(unet):
+                with accelerator.accumulate(model):
                     x = batch["images"]
                     p = batch["prompt"] if "prompt" in batch.keys() else None
 
@@ -424,19 +421,16 @@ class DiffusionClassifier(nn.Module):
                         p = torch.where(mask, torch.full_like(p, self.null_token), p).long()
 
                     loss = self.loss(x, p)
-                    loss = loss.to(next(unet.parameters()).dtype)
+                    loss = loss.to(next(model.parameters()).dtype)
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
-                        unet_params = dict(unet.named_parameters())
-                        all_params = {**unet_params}
+                        model_params = dict(model.named_parameters())
+                        all_params = {**model_params}
                         accelerator.clip_grad_norm_(all_params.values(), max_norm=1.0)
 
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
-
-                # Update EMA model parameters
-                #self.ema.update()
 
             epoch_elapsed = time.time() - epoch_start_time
             if accelerator.is_main_process:
@@ -450,7 +444,7 @@ class DiffusionClassifier(nn.Module):
             if epoch % self.config.save_image_epochs == 0 or epoch == self.config.num_epochs - 1:
                 val_evaluation_start_time = time.time()
 
-                unet.eval()
+                model.eval()
 
                 # Make directory for saving images
                 training_images_path = os.path.join(self.config.experiment_path, "training_images/")
@@ -498,7 +492,7 @@ class DiffusionClassifier(nn.Module):
 
                     print(f"Val evaluation time: {val_evaluation_elapsed:.2f} s.")
 
-                unet.train()
+                model.train()
 
     @torch.no_grad()
     def evaluate(
@@ -577,7 +571,7 @@ class DiffusionClassifier(nn.Module):
         # Make accelerator wrapper
         accelerator = Accelerator()
 
-        unet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
+        model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
             self.model, optimizer, train_dataloader, val_dataloader, lr_scheduler
         )
         if self.encoder_type == 'nn': # Learnable embeddings require separate preparation than pretrained models

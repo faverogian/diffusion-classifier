@@ -3,7 +3,7 @@ from diffusers import UNet2DModel, UNet2DConditionModel
 
 #----------------------------------------------------------------------------
 # Adaptation of HuggingFace's UNet2DModel to use with the 
-# simpleDiffusion pipeline
+# DiffusionClassifier pipeline
 
 class UNet2D(UNet2DModel):
     def __init__(        
