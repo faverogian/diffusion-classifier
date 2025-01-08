@@ -79,7 +79,6 @@ class DiffusionClassifier(nn.Module):
         elif self.encoder_type == 'DiT':
             # Leave class labels as they are
             embeddings = text
-            print(embeddings.shape)
         else:
             inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
             inputs.to(self.encoder.device)
@@ -212,7 +211,7 @@ class DiffusionClassifier(nn.Module):
         z_t = torch.randn(x.shape).to(x.device)
 
         # Get embeddings (and null embeddings) if text is provided
-        if text is not None and self.encoder is not None:
+        if text is not None and self.encoder_type is not None:
             text_embeddings = self.encode_text_prompt(text)
             text_embeddings = text_embeddings.to(x.device)
 
@@ -231,8 +230,8 @@ class DiffusionClassifier(nn.Module):
             u_t = steps[i]  # Current step
             u_s = steps[i + 1]  # Next step
 
-            logsnr_t = self.schedule(u_t).to(x.device)
-            logsnr_s = self.schedule(u_s).to(x.device)
+            logsnr_t = self.schedule(u_t).to(x.device).unsqueeze(0)
+            logsnr_s = self.schedule(u_s).to(x.device).unsqueeze(0)
 
             # Conditional sample
             pred = self.model(
@@ -252,8 +251,8 @@ class DiffusionClassifier(nn.Module):
             z_t = mu + torch.randn_like(mu) * torch.sqrt(variance)
 
         # Final step
-        logsnr_1 = self.schedule(steps[-2]).to(x.device)
-        logsnr_0 = self.schedule(steps[-1]).to(x.device)
+        logsnr_1 = self.schedule(steps[-2]).to(x.device).unsqueeze(0)
+        logsnr_0 = self.schedule(steps[-1]).to(x.device).unsqueeze(0)
 
         # Conditional sample
         pred = self.model(
@@ -612,7 +611,7 @@ class DiffusionClassifier(nn.Module):
     
     @torch.no_grad()
     def classify(self, x, text=None, fast=False):
-        assert self.encoder is not None, "Encoder must be provided for classification."
+        assert self.encoder_type is not None, "Encoder must be provided for classification."
         assert len(self.config.evaluation_per_stage) == self.config.n_stages, "Number of evaluations per stage must match the number of stages."
         assert len(self.config.n_keep_per_stage) == self.config.n_stages, "Number of classes to keep per stage must match the number of stages."
         assert self.config.n_keep_per_stage[-1] == 1, "Only one class should be selected at the end of the classification process."
