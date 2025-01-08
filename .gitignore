@@ -12,3 +12,9 @@ venv*/
 
 # logs
 **/logs*/
+
+# bash
+*.sh
+
+# .pkl
+*.pkl
