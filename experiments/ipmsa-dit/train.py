@@ -61,9 +61,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
     import matplotlib.pyplot as plt
     import numpy as np
 
-    pink_cmap = mcolors.LinearSegmentedColormap.from_list('pink_cmap', ['white', 'pink'])
     green_cmap = mcolors.LinearSegmentedColormap.from_list('green_cmap', ['white', 'green'])
-    red_cmap = mcolors.LinearSegmentedColormap.from_list('red_cmap', ['white', 'red'])
 
     slices = config.slices
     offset = slices // 2
@@ -73,7 +71,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
         prompts = batch["prompt"]
         samples = sample
 
-        for j in range(samples.shape[0]): # batch size
+        for j in range(2): # batch size
 
             flair_pred = samples[j][offset].cpu().numpy()
             ct2f_pred = samples[j][offset+1*slices].cpu().numpy()
@@ -184,7 +182,7 @@ def main():
         norm_num_groups=32,
         attention_bias=True,
         sample_size=config.image_size,
-        patch_size=2,
+        patch_size=8,
         activation_fn="gelu-approximate",
         num_embeds_ada_norm=1000,
         upcast_attention=False,
