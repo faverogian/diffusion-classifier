@@ -208,7 +208,7 @@ def main():
 
     # Create the diffusion classifier object
     diffusion_classifier = DiffusionClassifier(
-        unet=unet,
+        backbone=unet,
         config=config,
     )
 
