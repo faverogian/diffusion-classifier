@@ -10,7 +10,7 @@ if projectroot not in sys.path:
 os.chdir(projectroot)
 
 # Project imports
-from nets.dit import DiT
+from nets.unet import UNetCondition2D
 from dataset.chexpert import CheXpertDataLoader
 from diffusion.diffusion_classifier import DiffusionClassifier
 from utils.metrics import Accuracy, F1, Precision, Recall
@@ -108,27 +108,32 @@ def main():
     test_loader = chexpert.get_test_loader()
 
     # Define model - ADM architecture
-    dit = DiT(
-        num_attention_heads=16,
-        attention_head_dim=72,
-        in_channels=config.image_channels,
-        out_channels=config.image_channels,
-        num_layers=28,
-        dropout=0.0,
-        norm_num_groups=32,
-        attention_bias=True,
-        sample_size=config.image_size,
-        patch_size=2,
-        activation_fn="gelu-approximate",
-        num_embeds_ada_norm=1000,
-        upcast_attention=False,
-        norm_type="ada_norm_zero",
-        norm_elementwise_affine=False,
-        norm_eps=1e-5,
+    unet = UNetCondition2D(
+        sample_size=config.image_size,  # the target image resolution
+        in_channels=config.image_channels,  # the number of input channels, 3 for RGB images
+        out_channels=config.image_channels,  # the number of output channels
+        layers_per_block=2,  # how many ResNet layers to use per UNet block
+        block_out_channels=(128, 128, 256, 512),  # the number of output channels for each UNet block
+        down_block_types=(
+            "DownBlock2D",
+            "DownBlock2D",
+            "CrossAttnDownBlock2D",
+            "CrossAttnDownBlock2D",
+        ),
+        up_block_types=(
+            "CrossAttnUpBlock2D",
+            "CrossAttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+        mid_block_type="UNetMidBlock2DCrossAttn",
+        encoder_hid_dim=512,
+        encoder_hid_dim_type='text_proj',
+        cross_attention_dim=512
     )
 
     # Define optimizer and scheduler
-    optimizer = torch.optim.Adam(dit.parameters(), lr=config.learning_rate)
+    optimizer = torch.optim.Adam(unet.parameters(), lr=config.learning_rate)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=config.lr_warmup_steps,
@@ -137,7 +142,7 @@ def main():
 
     # Create the diffusion classifier object
     diffusion_classifier = DiffusionClassifier(
-        backbone=dit,
+        backbone=unet,
         config=config,
     )
 
