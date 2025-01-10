@@ -267,15 +267,16 @@ class Classifier(nn.Module):
                     metrics=metrics)
 
                 if val_metrics is not None:
+                    if accelerator.is_main_process:
+                        base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
+                        print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
                     for metric in val_metrics:
                         metric.sync_across_processes(accelerator)
                         metric_output = metric.get_output()
                         if experiment is not None and accelerator.is_main_process:
                             metric_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
                             experiment.log_metrics(metric_output, step=epoch)
-                        base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
                         if accelerator.is_main_process:
-                            print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
                             print(metric_output)
                         metric.reset()
 
