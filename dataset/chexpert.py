@@ -22,7 +22,7 @@ class CheXpertDataset(Dataset):
         self.img_dir = os.path.join(self.data_path, "train")
 
         # Get CSV path
-        self.csv_path = os.path.join(self.data_path, f"CheXpert-v1.0-small/train.csv")
+        self.csv_path = os.path.join(self.data_path, f"train.csv")
 
         # Load and filter CSV for Study1 frontal images
         self.data = self._filter_study1_frontal()
@@ -48,7 +48,7 @@ class CheXpertDataset(Dataset):
 
     def transforms(self):
         return transforms.Compose([
-            transforms.Resize((256,256)),
+            transforms.Resize((64,64)),
             transforms.ToTensor(),
     ])
 
@@ -78,8 +78,10 @@ class CheXpertDataset(Dataset):
     def __getitem__(self, idx):
         # Get row data
         row = self.data[idx]
-        img_path = os.path.join(self.data_path, row["Path"].item())
-        label = row["Lung Opacity"].item()
+        rel_path = row["Path"].item().split("/")[1:]
+        rel_path = os.path.join(*rel_path)
+        img_path = os.path.join(self.data_path, rel_path)
+        label = int(row["Lung Opacity"].item())
 
         # Load image
         image = Image.open(img_path).convert("RGB")

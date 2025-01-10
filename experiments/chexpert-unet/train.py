@@ -74,7 +74,7 @@ def chexpert_plotter(output_dir: str, batches: list, samples: list, epoch: int, 
             fig, axs = plt.subplots(1, 1, figsize=(5, 5))
 
             # Plot the predicted image at W096
-            axs.imshow(pred.permute(1, 2, 0))
+            axs.imshow(pred.transpose(1, 2, 0))
             axs.axis('off')
                 
             # Set top row title
