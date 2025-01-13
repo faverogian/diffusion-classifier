@@ -4,9 +4,10 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+from utils.wavelet import wavelet_dec_2
 
 class CheXpertDataset(Dataset):
-    def __init__(self, data_path, split="train"):
+    def __init__(self, data_path, split="train", wavelet_transform=False):
         """
         Args:
             data_path (str): Path to the CheXpert dataset.
@@ -15,6 +16,7 @@ class CheXpertDataset(Dataset):
         Note:
             Everything is derived from the train split.
         """
+        self.wavelet_transform = wavelet_transform
         self.data_path = data_path
         self.split = split if split != "test" else "valid"
 
@@ -48,7 +50,7 @@ class CheXpertDataset(Dataset):
 
     def transforms(self):
         return transforms.Compose([
-            transforms.Resize((64,64)),
+            transforms.Resize((256,256)),
             transforms.ToTensor(),
     ])
 
@@ -89,18 +91,21 @@ class CheXpertDataset(Dataset):
         # Convert image to tensor
         image = self.transforms()(image)
 
+        if self.wavelet_transform:
+            image = wavelet_dec_2(image) / 2 # Keep in range [-1, 1]
+
         return image, label
     
 class CheXpertDataLoader:
-    def __init__(self, data_path, batch_size=64, num_workers=4):
+    def __init__(self, wavelet_transform, data_path, batch_size=64, num_workers=4):
         self.data_path = data_path
         self.batch_size = batch_size
         self.num_workers = num_workers
 
         # Initialize datasets
-        self.train_dataset = CheXpertDataset(data_path=self.data_path, split="train")
-        self.val_dataset = CheXpertDataset(data_path=self.data_path, split="valid")
-        self.test_dataset = CheXpertDataset(data_path=self.data_path, split="test")
+        self.train_dataset = CheXpertDataset(data_path=self.data_path, split="train", wavelet_transform=wavelet_transform)
+        self.val_dataset = CheXpertDataset(data_path=self.data_path, split="valid", wavelet_transform=wavelet_transform)
+        self.test_dataset = CheXpertDataset(data_path=self.data_path, split="test", wavelet_transform=wavelet_transform)
 
         # Initialize DataLoaders
         self.train_loader = DataLoader(
