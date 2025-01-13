@@ -335,6 +335,7 @@ class DiffusionClassifier(nn.Module):
         val_dataloader,
         lr_scheduler, 
         metrics=None,
+        checkpoint_metric=None,
         plot_function=None,
     ):
         """
@@ -371,6 +372,7 @@ class DiffusionClassifier(nn.Module):
 
         # Ensure metrics are on the correct device
         if metrics is not None:
+            checkpoint_tracker = {'value': 0, 'save_flag': False}
             for metric in metrics:
                 metric.set_device(accelerator.device)
 
@@ -476,21 +478,38 @@ class DiffusionClassifier(nn.Module):
                     for metric in metrics:
                         metric.sync_across_processes(accelerator)
                         metric_output = metric.get_output()
-                        if experiment is not None and accelerator.is_main_process:
-                            metric_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
-                            experiment.log_metrics(metric_output, step=epoch)
-                            experiment.log_image(name=f"Sample at epoch {epoch}", image_data=image_path)
-                        base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
-                        print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
-                        print(metric_output)
+
+                        if (checkpoint_metric is not None) and (metric.name == checkpoint_metric):
+                            if metric_output[metric.name].item() > checkpoint_tracker['value']:
+                                checkpoint_tracker['value'] = metric_output[metric.name].item()
+                                checkpoint_tracker['save_flag'] = True
+
+                        if accelerator.is_main_process:
+                            if experiment is not None: 
+                                log_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
+                                experiment.log_metrics(log_output, step=epoch)
+                                experiment.log_image(name=f"Sample at epoch {epoch}", image_data=image_path)
+
+                            base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
+                            print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
+                            print(metric_output)
+
                         metric.reset()
                 
+                # Print some statistics, save (best) checkpoint
                 val_evaluation_elapsed = time.time() - val_evaluation_start_time
                 if accelerator.is_main_process:
-                    self.save_checkpoint(accelerator, epoch, metrics, experiment)
+                    if (checkpoint_metric is not None): 
+                        if (checkpoint_tracker['save_flag']):
+                            self.save_checkpoint(accelerator, epoch, metrics, experiment)
+                            print(f"New best {checkpoint_metric} found. Checkpoint saved.")
+                    else:
+                        self.save_checkpoint(accelerator, epoch, metrics, experiment)
 
                     print(f"Val evaluation time: {val_evaluation_elapsed:.2f} s.")
 
+                # Reset flags
+                checkpoint_tracker['save_flag'] = False
                 model.train()
 
     @torch.no_grad()

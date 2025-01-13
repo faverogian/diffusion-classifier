@@ -13,7 +13,8 @@ os.chdir(projectroot)
 from nets.unet import UNetCondition2D
 from dataset.ipmsa import LORISTransforms, IPMSADataLoader, MRIImageKeys
 from diffusion.diffusion_classifier import DiffusionClassifier
-from utils.metrics import Accuracy
+from utils.metrics import Accuracy, F1, Precision, Recall
+from utils.wavelet import wavelet_dec_2, wavelet_enc_2
 
 # Third party imports
 import torch
@@ -61,9 +62,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
     import matplotlib.pyplot as plt
     import numpy as np
 
-    pink_cmap = mcolors.LinearSegmentedColormap.from_list('pink_cmap', ['white', 'pink'])
     green_cmap = mcolors.LinearSegmentedColormap.from_list('green_cmap', ['white', 'green'])
-    red_cmap = mcolors.LinearSegmentedColormap.from_list('red_cmap', ['white', 'red'])
 
     slices = config.slices
     offset = slices // 2
@@ -73,10 +72,16 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
         prompts = batch["prompt"]
         samples = sample
 
-        for j in range(samples.shape[0]): # batch size
+        for j in range(2): # batch size
+            
+            if config.wavelet_transform:
+                sample_item = samples[j] * 2 # Get back to range [-1 * level, 1 * level]
+                sample_item = wavelet_enc_2(sample_item) # Should be back to range [-1, 1]
+            else:
+                sample_item = samples[j]
 
-            flair_pred = samples[j][offset].cpu().numpy()
-            ct2f_pred = samples[j][offset+1*slices].cpu().numpy()
+            flair_pred = sample_item[offset].cpu().numpy()
+            ct2f_pred = sample_item[offset+1*slices].cpu().numpy()
             
             prompt = prompts[j]
             activity = "active" if prompt else "inactive"
@@ -144,6 +149,10 @@ def main():
         # Convert the tensors to half precision
         images = images.to(torch.float32)
 
+        # Wavelet transform (one level)
+        if config.wavelet_transform:
+            images = wavelet_dec_2(images) / 2 # Keep in range [-1, 1]
+
         # Activity data
         newt2_w048 = x[MRIImageKeys.NEWT2][1]/2 + 0.5
         newt2_w096 = x[MRIImageKeys.NEWT2][2]/2 + 0.5
@@ -173,14 +182,15 @@ def main():
     val_loader = ipmsa.get_val_loader()
     test_loader = ipmsa.get_test_loader()
 
-    # Define model - ADM architecture
+    # Define model - somewhat aligned with simple diffusion ImageNet 128 model
     unet = UNetCondition2D(
-        sample_size=config.image_size,  # the target image resolution
-        in_channels=config.image_channels,  # the number of input channels, 3 for RGB images
-        out_channels=config.image_channels,  # the number of output channels
-        layers_per_block=2,  # how many ResNet layers to use per UNet block
-        block_out_channels=(128, 128, 256, 512),  # the number of output channels for each UNet block
+        sample_size=config.image_size if not config.wavelet_transform else config.image_size//2,
+        in_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
+        out_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
+        layers_per_block=(2, 2, 4, 4, 4),  # how many ResNet layers to use per UNet block
+        block_out_channels=(128, 256, 256, 512, 768),  # the number of output channels for each UNet block
         down_block_types=(
+            "DownBlock2D",
             "DownBlock2D",
             "DownBlock2D",
             "CrossAttnDownBlock2D",
@@ -191,11 +201,12 @@ def main():
             "CrossAttnUpBlock2D",
             "UpBlock2D",
             "UpBlock2D",
+            "UpBlock2D",
         ),
         mid_block_type="UNetMidBlock2DCrossAttn",
-        encoder_hid_dim=512,
+        encoder_hid_dim=256,
         encoder_hid_dim_type='text_proj',
-        cross_attention_dim=512
+        cross_attention_dim=256
     )
 
     # Define optimizer and scheduler
@@ -208,9 +219,11 @@ def main():
 
     # Create the diffusion classifier object
     diffusion_classifier = DiffusionClassifier(
-        unet=unet,
+        backbone=unet,
         config=config,
     )
+
+    metrics=[Accuracy("accuracy"), F1("f1"), Precision("precision"), Recall("recall")]
 
     # Train the model
     diffusion_classifier.train_loop(
@@ -218,7 +231,8 @@ def main():
         val_dataloader=val_loader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        metrics=[Accuracy("classification accuracy")],
+        metrics=metrics,
+        checkpoint_metric="f1",
         plot_function=ipmsa_plotter
     )
 
