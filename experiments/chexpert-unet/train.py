@@ -11,16 +11,15 @@ os.chdir(projectroot)
 
 # Project imports
 from nets.unet import UNetCondition2D
-from dataset.ipmsa import LORISTransforms, IPMSADataLoader, MRIImageKeys
+from dataset.chexpert import CheXpertDataLoader
 from diffusion.diffusion_classifier import DiffusionClassifier
 from utils.metrics import Accuracy, F1, Precision, Recall
-from utils.wavelet import wavelet_dec_2, wavelet_enc_2
+from utils.wavelet import wavelet_enc_2
 
 # Third party imports
 import torch
 from diffusers.optimization import get_cosine_schedule_with_warmup
 import accelerate
-from torchvision import transforms
 
 # Training configuration
 class TrainingConfig:
@@ -39,9 +38,9 @@ class TrainingConfig:
     def __getattr__(self, name):
         return self.config.get(name)
     
-def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, process_idx: int):
+def chexpert_plotter(output_dir: str, batches: list, samples: list, epoch: int, process_idx: int):
     """
-    Plot IPMSA samples and save them to the output_dir
+    Plot CheXpert samples and save them to the output_dir
 
     output_dir: str
         The output directory to save the plots
@@ -60,28 +59,20 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
     """
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
-    import numpy as np
-
-    green_cmap = mcolors.LinearSegmentedColormap.from_list('green_cmap', ['white', 'green'])
-
-    slices = config.slices
-    offset = slices // 2
-    alpha_threshold = 0.15
 
     for i, (batch, sample) in enumerate(zip(batches, samples)):
         prompts = batch["prompt"]
         samples = sample
 
-        for j in range(2): # batch size
-            
+        for j in range(1): # batch size
+
             if config.wavelet_transform:
-                sample_item = samples[j] * 2 # Get back to range [-1 * level, 1 * level]
-                sample_item = wavelet_enc_2(sample_item) # Should be back to range [-1, 1]
+                sample_item = samples[j] * 2 # Put it in range [-1 * downscale factor, 1 * downscale factor]
+                sample_item = wavelet_enc_2(sample_item) # [-1, 1]
             else:
                 sample_item = samples[j]
 
-            flair_pred = sample_item[offset].cpu().numpy()
-            ct2f_pred = sample_item[offset+1*slices].cpu().numpy()
+            pred = sample_item.cpu().detach().numpy()
             
             prompt = prompts[j]
             activity = "active" if prompt else "inactive"
@@ -89,11 +80,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
             fig, axs = plt.subplots(1, 1, figsize=(5, 5))
 
             # Plot the predicted image at W096
-            ct2f_pred_alpha = ct2f_pred.copy()
-            ct2f_pred_alpha[ct2f_pred_alpha <= alpha_threshold] = 0
-            ct2f_pred_alpha[ct2f_pred_alpha > alpha_threshold] = 1
-            axs.imshow(flair_pred, cmap='gray')
-            axs.imshow(ct2f_pred, cmap=green_cmap, alpha=ct2f_pred_alpha)
+            axs.imshow(pred.transpose(1, 2, 0))
             axs.axis('off')
                 
             # Set top row title
@@ -116,90 +103,31 @@ def main():
     # Set seed
     accelerate.utils.set_seed(config.seed)
 
-    preprocess = transforms.Compose([
-        LORISTransforms.PadTimepoints(),
-        LORISTransforms.GetSlice(slices=config.slices),
-        LORISTransforms.Denoise(),
-        LORISTransforms.BinarizeLabel(),
-        LORISTransforms.Resize(),
-        LORISTransforms.ToTensor(),
-        LORISTransforms.BlurLabel3D(sigma=1, kernel_size=5), # done on tensor
-        LORISTransforms.NormalizeTensor(), # done on tensor
-    ])
-
-    def transform(x):
-        '''
-        Trials: OPERA1, OPERA2, DEFINE_ENDORSE, BRAVO
-        Sequences: BEAST, FLAIR, GAD, CT2F
-        Timepoints: W000, (W024), W048, W096
-
-        Notes: 
-            OPERA1, OPERA2, DEFINE_ENDORSE have W000, W024, W048, W096
-            BRAVO has W000, W048, W096, W096. We will use W000, W048, W096.
-            To do this, W024 is combined with W048 for OPERAs and DEFINE_ENDORSE.
-        '''
-        x = preprocess(x['output']) 
-
-        # Create the target image tensor
-        flair_w000 = x[MRIImageKeys.FLAIR][0]
-        ct2f_w000 = x[MRIImageKeys.CT2F][0]
-         
-        images = torch.cat([flair_w000, ct2f_w000], dim=0)
-
-        # Convert the tensors to half precision
-        images = images.to(torch.float32)
-
-        # Wavelet transform (one level)
-        if config.wavelet_transform:
-            images = wavelet_dec_2(images) / 2 # Keep in range [-1, 1]
-
-        # Activity data
-        newt2_w048 = x[MRIImageKeys.NEWT2][1]/2 + 0.5
-        newt2_w096 = x[MRIImageKeys.NEWT2][2]/2 + 0.5
-        newt2 = (newt2_w048 + newt2_w096).clamp(0,1)
-        active_label = torch.sum(newt2) > 0
-
-        # Make prompt for patient
-        prompt = int(active_label)
-
-        return {'images': images, 'prompt': prompt}
-
-    train_data_path = os.path.join(config.experiment_path, 'split/train_dataset_filtered.pkl')
-    val_data_path = os.path.join(config.experiment_path, 'split/val_dataset_filtered.pkl')
-    test_data_path = os.path.join(config.experiment_path, 'split/test_dataset_filtered.pkl')
-
-    ipmsa = IPMSADataLoader(
-        train_data_path,
-        val_data_path,
-        test_data_path,
-        transform,
-        config.slurm,
-        config.batch_size,
-        config.num_workers
+    chexpert = CheXpertDataLoader(
+        data_path=config.data_path,
+        wavelet_transform=config.wavelet_transform,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers
     )
 
-    train_loader = ipmsa.get_train_loader()
-    val_loader = ipmsa.get_val_loader()
-    test_loader = ipmsa.get_test_loader()
+    train_loader = chexpert.get_train_loader()
+    val_loader = chexpert.get_val_loader()
+    test_loader = chexpert.get_test_loader()
 
     # Define model - somewhat aligned with simple diffusion ImageNet 128 model
     unet = UNetCondition2D(
         sample_size=config.image_size if not config.wavelet_transform else config.image_size//2,
         in_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
         out_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
-        layers_per_block=(2, 2, 4, 4, 4),  # how many ResNet layers to use per UNet block
-        block_out_channels=(128, 256, 256, 512, 768),  # the number of output channels for each UNet block
+        layers_per_block=2,  # how many ResNet layers to use per UNet block
+        block_out_channels=(256, 512, 768),  # the number of output channels for each UNet block
         down_block_types=(
             "DownBlock2D",
             "DownBlock2D",
-            "DownBlock2D",
-            "CrossAttnDownBlock2D",
             "CrossAttnDownBlock2D",
         ),
         up_block_types=(
             "CrossAttnUpBlock2D",
-            "CrossAttnUpBlock2D",
-            "UpBlock2D",
             "UpBlock2D",
             "UpBlock2D",
         ),
@@ -223,7 +151,7 @@ def main():
         config=config,
     )
 
-    metrics=[Accuracy("accuracy"), F1("f1"), Precision("precision"), Recall("recall")]
+    metrics = [Accuracy("accuracy"), F1("f1"), Precision("precision"), Recall("recall")]
 
     # Train the model
     diffusion_classifier.train_loop(
@@ -233,7 +161,7 @@ def main():
         lr_scheduler=lr_scheduler,
         metrics=metrics,
         checkpoint_metric="f1",
-        plot_function=ipmsa_plotter
+        plot_function=chexpert_plotter
     )
 
 if __name__ == "__main__":

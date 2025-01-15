@@ -197,7 +197,7 @@ class DiffusionClassifier(nn.Module):
         return mu, variance
     
     @torch.no_grad()
-    def sample(self, x, text=None):
+    def sample(self, x, text=None, from_t=1):
         """
         Standard DDPM sampling procedure. Begun by sampling z_T ~ N(0, 1)
         and then repeatedly sampling z_s ~ p(z_s | z_t)
@@ -208,7 +208,14 @@ class DiffusionClassifier(nn.Module):
         Returns:
         x_pred (torch.Tensor): The predicted tensor.
         """
-        z_t = torch.randn(x.shape).to(x.device)
+        if from_t == 1:
+            z_t = torch.randn(x.shape).to(x.device)
+        else:
+            t = torch.ones(x.shape[0]) * from_t
+            logsnr_t = self.schedule(t).to(x.device)
+            alpha_t = torch.sqrt(torch.sigmoid(logsnr_t)).view(-1, 1, 1, 1).to(x.device)
+            sigma_t = torch.sqrt(torch.sigmoid(-logsnr_t)).view(-1, 1, 1, 1).to(x.device)
+            z_t, _ = self.diffuse(x, alpha_t, sigma_t)
 
         # Get embeddings (and null embeddings) if text is provided
         if text is not None and self.encoder_type is not None:
@@ -272,9 +279,6 @@ class DiffusionClassifier(nn.Module):
         
         x_pred = self.clip(x_pred)
 
-        # Convert x_pred to the range [0, 1]
-        x_pred = (x_pred + 1) / 2
-
         return x_pred
     
     def loss(self, x, text=None):
@@ -335,6 +339,7 @@ class DiffusionClassifier(nn.Module):
         val_dataloader,
         lr_scheduler, 
         metrics=None,
+        checkpoint_metric=None,
         plot_function=None,
     ):
         """
@@ -371,6 +376,7 @@ class DiffusionClassifier(nn.Module):
 
         # Ensure metrics are on the correct device
         if metrics is not None:
+            checkpoint_tracker = {'value': 0, 'save_flag': False}
             for metric in metrics:
                 metric.set_device(accelerator.device)
 
@@ -476,21 +482,36 @@ class DiffusionClassifier(nn.Module):
                     for metric in metrics:
                         metric.sync_across_processes(accelerator)
                         metric_output = metric.get_output()
-                        if experiment is not None and accelerator.is_main_process:
-                            metric_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
-                            experiment.log_metrics(metric_output, step=epoch)
-                            experiment.log_image(name=f"Sample at epoch {epoch}", image_data=image_path)
-                        base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
-                        print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
-                        print(metric_output)
+
+                        if (checkpoint_metric is not None) and (metric.name == checkpoint_metric):
+                            if metric_output[metric.name].item() > checkpoint_tracker['value']:
+                                checkpoint_tracker['value'] = metric_output[metric.name].item()
+                                checkpoint_tracker['save_flag'] = True
+
+                        if accelerator.is_main_process:
+                            if experiment is not None: 
+                                log_output = {f"val_{metric_name}": value for metric_name, value in metric_output.items()}
+                                experiment.log_metrics(log_output, step=epoch)
+                                experiment.log_image(name=f"Sample at epoch {epoch}", image_data=image_path)
+
+                            base_line_accuracy = 1/self.config.n_fast_classes if self.config.fast_classification else 1/self.config.classes
+                            print(f"Baseline Classification Accuracy: {base_line_accuracy:.2f}")
+                            print(metric_output)
+
                         metric.reset()
                 
+                # Print some statistics, save (best) checkpoint
                 val_evaluation_elapsed = time.time() - val_evaluation_start_time
                 if accelerator.is_main_process:
-                    self.save_checkpoint(accelerator, epoch, metrics, experiment)
+                    if (checkpoint_metric is not None): 
+                        self.save_checkpoint(accelerator, epoch, experiment, best=checkpoint_tracker['save_flag'])
+                    else:
+                        self.save_checkpoint(accelerator, epoch, experiment)
 
                     print(f"Val evaluation time: {val_evaluation_elapsed:.2f} s.")
 
+                # Reset flags
+                checkpoint_tracker['save_flag'] = False
                 model.train()
 
     @torch.no_grad()
@@ -499,7 +520,8 @@ class DiffusionClassifier(nn.Module):
         val_dataloader, 
         stop_idx=None,
         metrics=None,
-        classification=False
+        classification=False,
+        from_t=1
     ):
         """
         A function to evaluate the model.
@@ -523,7 +545,7 @@ class DiffusionClassifier(nn.Module):
             x = batch["images"]
             p = batch["prompt"] if "prompt" in batch.keys() else None
             
-            sample = self.classify(x, p, fast=self.config.fast_classification) if classification else self.sample(x, p)
+            sample = self.classify(x, p, fast=self.config.fast_classification) if classification else self.sample(x, p, from_t)
                         
             # Update the metrics
             if metrics is not None:
@@ -540,6 +562,7 @@ class DiffusionClassifier(nn.Module):
 
         return val_samples, batches, metrics
     
+    # TODO - fix parameters because some of them are just config.something
     @torch.no_grad()
     def inference(
         self, 
@@ -549,7 +572,9 @@ class DiffusionClassifier(nn.Module):
         lr_scheduler, 
         metrics=None,
         plot_function=None,
-        classification=False
+        classification=False,
+        from_t=1,
+        checkpoint_folder="checkpoints"
     ):
         """
         A function to perform inference.
@@ -561,6 +586,8 @@ class DiffusionClassifier(nn.Module):
         lr_scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler.
         metrics (list): A list of metrics to evaluate.
         plot_function (function): The function to use for plotting the samples.
+        classification (bool): Whether to perform classification.
+        from_t (int): The timepoint to start sampling from (default is 1).
         """
 
         # Make directory for saving images
@@ -577,18 +604,20 @@ class DiffusionClassifier(nn.Module):
             self.encoder = accelerator.prepare(self.encoder)
         
         # Load most recent checkpoint
-        checkpoint_path = os.path.join(self.config.experiment_path, "checkpoints")
+        checkpoint_path = os.path.join(self.config.experiment_path, checkpoint_folder)
         self.load_checkpoint(checkpoint_path, accelerator)
 
         if metrics is not None:
             for metric in metrics:
                 metric.set_device(accelerator.device)
 
+        # TODO - metrics, classification, image sampling needs to be in a state machine
         val_samples, batches, metrics = self.evaluate(
                                             val_dataloader, 
                                             metrics=metrics,
                                             stop_idx=self.config.evaluation_batches,
-                                            classification=classification
+                                            classification=classification,
+                                            from_t=from_t
                                         )
         
         metric_output = []
@@ -678,17 +707,16 @@ class DiffusionClassifier(nn.Module):
         assert classes.shape[1] == 1, "Only one class should be selected at the end of the classification process."
 
         return classes[:, 0]
-
     
-    def save_checkpoint(self, accelerator: Accelerator, epoch, metrics, experiment):
+    def save_checkpoint(self, accelerator: Accelerator, epoch, experiment, best=False):
         """
         Saves the model checkpoint.
 
         Args:
         accelerator (accelerate.Accelerator): The Accelerator object.
         epoch (int): The current epoch.
-        metrics (list): A list of metrics.
         experiment (comet_ml.Experiment): The CometML experiment object.
+        best (bool): Whether this checkpoint is the best so far. Defaults to False.
         """
         checkpoint_dir = os.path.join(self.config.experiment_path, "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure directory exists
@@ -707,6 +735,18 @@ class DiffusionClassifier(nn.Module):
         torch.save(experiment_state, latest_exp_state_path)
 
         print(f"Checkpoint saved to {latest_exp_state_path}")
+
+        # Save best checkpoint if necessary
+        if best:
+            best_checkpoint_dir = os.path.join(self.config.experiment_path, "best_checkpoint")
+            os.makedirs(best_checkpoint_dir, exist_ok=True)  # Ensure directory exists
+
+            # Save accelerator state
+            accelerator.save_state(output_dir=best_checkpoint_dir)
+
+            best_exp_state_path = os.path.join(best_checkpoint_dir, "experiment_state.pth")
+            torch.save(experiment_state, best_exp_state_path)
+            print(f"Best checkpoint saved to {best_exp_state_path}")
     
     def load_checkpoint(self, checkpoint_path, accelerator: Accelerator):
         """

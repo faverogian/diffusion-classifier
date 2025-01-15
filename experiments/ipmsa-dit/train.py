@@ -13,7 +13,8 @@ os.chdir(projectroot)
 from nets.dit import DiT
 from dataset.ipmsa import LORISTransforms, IPMSADataLoader, MRIImageKeys
 from diffusion.diffusion_classifier import DiffusionClassifier
-from utils.metrics import Accuracy
+from utils.metrics import Accuracy, F1, Precision, Recall
+from utils.wavelet import wavelet_dec_2, wavelet_enc_2
 
 # Third party imports
 import torch
@@ -72,9 +73,15 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
         samples = sample
 
         for j in range(2): # batch size
+            
+            if config.wavelet_transform:
+                sample_item = samples[j] * 2
+                sample_item = wavelet_enc_2(sample_item)
+            else:
+                sample_item = samples[j]
 
-            flair_pred = samples[j][offset].cpu().numpy()
-            ct2f_pred = samples[j][offset+1*slices].cpu().numpy()
+            flair_pred = sample_item[offset].cpu().numpy()
+            ct2f_pred = sample_item[offset+1*slices].cpu().numpy()
             
             prompt = prompts[j]
             activity = "active" if prompt else "inactive"
@@ -142,6 +149,10 @@ def main():
         # Convert the tensors to half precision
         images = images.to(torch.float32)
 
+        # Wavelet transform (one level)
+        if config.wavelet_transform:
+            images = wavelet_dec_2(images) / 2 # Keep in range [-1, 1]
+
         # Activity data
         newt2_w048 = x[MRIImageKeys.NEWT2][1]/2 + 0.5
         newt2_w096 = x[MRIImageKeys.NEWT2][2]/2 + 0.5
@@ -171,18 +182,18 @@ def main():
     val_loader = ipmsa.get_val_loader()
     test_loader = ipmsa.get_test_loader()
 
-    # Define model - ADM architecture
+    # Define model
     dit = DiT(
-        num_attention_heads=16,
-        attention_head_dim=72,
-        in_channels=config.image_channels,
-        out_channels=config.image_channels,
-        num_layers=28,
+        num_attention_heads=6,
+        attention_head_dim=64,
+        in_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
+        out_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
+        num_layers=12,
         dropout=0.0,
         norm_num_groups=32,
         attention_bias=True,
-        sample_size=config.image_size,
-        patch_size=8,
+        sample_size=config.image_size if not config.wavelet_transform else config.image_size//2,
+        patch_size=config.patch_size,
         activation_fn="gelu-approximate",
         num_embeds_ada_norm=1000,
         upcast_attention=False,
@@ -205,13 +216,16 @@ def main():
         config=config,
     )
 
+    metrics = [Accuracy("accuracy"), F1("f1"), Precision("precision"), Recall("recall")]
+
     # Train the model
     diffusion_classifier.train_loop(
         train_dataloader=train_loader,
         val_dataloader=val_loader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        metrics=[Accuracy("classification accuracy")],
+        metrics=metrics,
+        checkpoint_metric="f1",
         plot_function=ipmsa_plotter
     )
 

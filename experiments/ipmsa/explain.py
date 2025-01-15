@@ -72,29 +72,45 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
         prompts = batch["prompt"]
         samples = sample
 
-        for j in range(2): # batch size
+        for j in range(5): # batch size
             
             if config.wavelet_transform:
                 sample_item = samples[j] * 2 # Get back to range [-1 * level, 1 * level]
                 sample_item = wavelet_enc_2(sample_item) # Should be back to range [-1, 1]
+                batch_item = batch['images'][j] * 2
+                batch_item = wavelet_enc_2(batch_item)
             else:
                 sample_item = samples[j]
+                batch_item = batch['images'][j]
 
+            # Get the predicted images
             flair_pred = sample_item[offset].cpu().numpy()
             ct2f_pred = sample_item[offset+1*slices].cpu().numpy()
+
+            # Get the actual images
+            flair_actual = batch_item[offset].cpu().numpy()
+            ct2f_actual = batch_item[offset+1*slices].cpu().numpy()
             
             prompt = prompts[j]
             activity = "active" if prompt else "inactive"
 
-            fig, axs = plt.subplots(1, 1, figsize=(5, 5))
+            fig, axs = plt.subplots(1, 2, figsize=(10, 5))
 
+            # Plot the actual image at W096
+            ct2f_actual_alpha = ct2f_actual.copy()
+            ct2f_actual_alpha[ct2f_actual_alpha <= alpha_threshold] = 0
+            ct2f_actual_alpha[ct2f_actual_alpha > alpha_threshold] = 1
+            axs[0].imshow(flair_actual, cmap='gray')
+            axs[0].imshow(ct2f_actual, cmap=green_cmap, alpha=ct2f_actual_alpha)
+            axs[0].axis('off')
+            
             # Plot the predicted image at W096
             ct2f_pred_alpha = ct2f_pred.copy()
             ct2f_pred_alpha[ct2f_pred_alpha <= alpha_threshold] = 0
             ct2f_pred_alpha[ct2f_pred_alpha > alpha_threshold] = 1
-            axs.imshow(flair_pred, cmap='gray')
-            axs.imshow(ct2f_pred, cmap=green_cmap, alpha=ct2f_pred_alpha)
-            axs.axis('off')
+            axs[1].imshow(flair_pred, cmap='gray')
+            axs[1].imshow(ct2f_pred, cmap=green_cmap, alpha=ct2f_pred_alpha)
+            axs[1].axis('off')
                 
             # Set top row title
             fig.suptitle(f"Patient status: {activity}", fontsize=16)
@@ -109,7 +125,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
 
     return image_path
 
-def main():
+def main(active_label=True):
     global config
     config = TrainingConfig()
 
@@ -152,12 +168,6 @@ def main():
         # Wavelet transform (one level)
         if config.wavelet_transform:
             images = wavelet_dec_2(images) / 2 # Keep in range [-1, 1]
-
-        # Activity data
-        newt2_w048 = x[MRIImageKeys.NEWT2][1]/2 + 0.5
-        newt2_w096 = x[MRIImageKeys.NEWT2][2]/2 + 0.5
-        newt2 = (newt2_w048 + newt2_w096).clamp(0,1)
-        active_label = torch.sum(newt2) > 0
 
         # Make prompt for patient
         prompt = int(active_label)
@@ -223,18 +233,20 @@ def main():
         config=config,
     )
 
-    metrics=[Accuracy("accuracy"), F1("f1"), Precision("precision"), Recall("recall")]
+    metrics=None
 
     # Train the model
-    diffusion_classifier.train_loop(
+    diffusion_classifier.inference(
         train_dataloader=train_loader,
-        val_dataloader=val_loader,
+        val_dataloader=test_loader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         metrics=metrics,
-        checkpoint_metric="f1",
-        plot_function=ipmsa_plotter
+        plot_function=ipmsa_plotter,
+        classification=config.classification,
+        from_t=0.5
     )
 
 if __name__ == "__main__":
-    main()
+    for active_label in [True, False]:
+        main(active_label=active_label)
