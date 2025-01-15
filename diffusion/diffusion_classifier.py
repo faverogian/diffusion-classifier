@@ -456,17 +456,17 @@ class DiffusionClassifier(nn.Module):
 
                 # TODO: cleanup and consider multiple metrics
                 val_samples, batches, _ = self.evaluate(
-                                                    val_dataloader, 
-                                                    stop_idx=self.config.evaluation_batches,
-                                                    metrics=None,
-                                                )
+                                            val_dataloader, 
+                                            stop_idx=self.config.evaluation_batches,
+                                            metrics=None,
+                                        )
                 
                 _, _, metrics = self.evaluate(
-                                                    val_dataloader, 
-                                                    stop_idx=self.config.evaluation_batches,
-                                                    metrics=metrics,
-                                                    classification=True
-                                                )
+                                    val_dataloader, 
+                                    stop_idx=self.config.evaluation_batches,
+                                    metrics=metrics,
+                                    classification=True
+                                )
                 
                 # Use the provided plot_function to plot the samples
                 if plot_function is not None:

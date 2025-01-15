@@ -111,6 +111,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
 
 def main():
     global config
+
     config = TrainingConfig()
 
     # Set seed
@@ -152,7 +153,7 @@ def main():
         # Wavelet transform (one level)
         if config.wavelet_transform:
             images = wavelet_dec_2(images) / 2 # Keep in range [-1, 1]
-
+        
         # Activity data
         newt2_w048 = x[MRIImageKeys.NEWT2][1]/2 + 0.5
         newt2_w096 = x[MRIImageKeys.NEWT2][2]/2 + 0.5

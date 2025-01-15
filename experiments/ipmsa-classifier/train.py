@@ -13,7 +13,7 @@ os.chdir(projectroot)
 from dataset.ipmsa import LORISTransforms, IPMSADataLoader, MRIImageKeys
 from nets.resnet import ResNet2D
 from classifier.classifier import Classifier
-from utils.metrics import Accuracy
+from utils.metrics import Accuracy, Precision, Recall, F1
 
 # Third-party imports
 import torch
@@ -125,7 +125,7 @@ def main():
     )
 
 
-    metrics = [Accuracy("classification accuracy")]
+    metrics = [Accuracy("classification accuracy"), Precision("precision"), Recall("recall"), F1("f1")]
 
     classifier.train_loop(
         optimizer=optimizer,

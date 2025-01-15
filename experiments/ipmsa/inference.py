@@ -111,6 +111,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
 
 def main():
     global config
+    
     config = TrainingConfig()
 
     # Set seed
