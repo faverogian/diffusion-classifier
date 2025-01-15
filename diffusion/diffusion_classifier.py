@@ -504,11 +504,9 @@ class DiffusionClassifier(nn.Module):
                 val_evaluation_elapsed = time.time() - val_evaluation_start_time
                 if accelerator.is_main_process:
                     if (checkpoint_metric is not None): 
-                        if (checkpoint_tracker['save_flag']):
-                            self.save_checkpoint(accelerator, epoch, metrics, experiment)
-                            print(f"New best {checkpoint_metric} found. Checkpoint saved.")
+                        self.save_checkpoint(accelerator, epoch, experiment, best=checkpoint_tracker['save_flag'])
                     else:
-                        self.save_checkpoint(accelerator, epoch, metrics, experiment)
+                        self.save_checkpoint(accelerator, epoch, experiment)
 
                     print(f"Val evaluation time: {val_evaluation_elapsed:.2f} s.")
 
@@ -709,17 +707,16 @@ class DiffusionClassifier(nn.Module):
         assert classes.shape[1] == 1, "Only one class should be selected at the end of the classification process."
 
         return classes[:, 0]
-
     
-    def save_checkpoint(self, accelerator: Accelerator, epoch, metrics, experiment):
+    def save_checkpoint(self, accelerator: Accelerator, epoch, experiment, best=False):
         """
         Saves the model checkpoint.
 
         Args:
         accelerator (accelerate.Accelerator): The Accelerator object.
         epoch (int): The current epoch.
-        metrics (list): A list of metrics.
         experiment (comet_ml.Experiment): The CometML experiment object.
+        best (bool): Whether this checkpoint is the best so far. Defaults to False.
         """
         checkpoint_dir = os.path.join(self.config.experiment_path, "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure directory exists
@@ -738,6 +735,18 @@ class DiffusionClassifier(nn.Module):
         torch.save(experiment_state, latest_exp_state_path)
 
         print(f"Checkpoint saved to {latest_exp_state_path}")
+
+        # Save best checkpoint if necessary
+        if best:
+            best_checkpoint_dir = os.path.join(self.config.experiment_path, "best_checkpoint")
+            os.makedirs(best_checkpoint_dir, exist_ok=True)  # Ensure directory exists
+
+            # Save accelerator state
+            accelerator.save_state(output_dir=best_checkpoint_dir)
+
+            best_exp_state_path = os.path.join(best_checkpoint_dir, "experiment_state.pth")
+            torch.save(experiment_state, best_exp_state_path)
+            print(f"Best checkpoint saved to {best_exp_state_path}")
     
     def load_checkpoint(self, checkpoint_path, accelerator: Accelerator):
         """
