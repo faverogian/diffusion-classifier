@@ -10,7 +10,7 @@ if projectroot not in sys.path:
 os.chdir(projectroot)
 
 # Project imports
-from nets.dit import DiT
+from nets.unet import UNetCondition2D
 from dataset.ipmsa import LORISTransforms, IPMSADataLoader, MRIImageKeys
 from diffusion.diffusion_classifier import DiffusionClassifier
 from utils.metrics import Accuracy, F1, Precision, Recall
@@ -72,29 +72,45 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
         prompts = batch["prompt"]
         samples = sample
 
-        for j in range(2): # batch size
+        for j in range(5): # batch size
             
             if config.wavelet_transform:
-                sample_item = samples[j] * 2
-                sample_item = wavelet_enc_2(sample_item)
+                sample_item = samples[j] * 2 # Get back to range [-1 * level, 1 * level]
+                sample_item = wavelet_enc_2(sample_item) # Should be back to range [-1, 1]
+                batch_item = batch['images'][j] * 2
+                batch_item = wavelet_enc_2(batch_item)
             else:
                 sample_item = samples[j]
+                batch_item = batch['images'][j]
 
+            # Get the predicted images
             flair_pred = sample_item[offset].cpu().numpy()
             ct2f_pred = sample_item[offset+1*slices].cpu().numpy()
+
+            # Get the actual images
+            flair_actual = batch_item[offset].cpu().numpy()
+            ct2f_actual = batch_item[offset+1*slices].cpu().numpy()
             
             prompt = prompts[j]
             activity = "active" if prompt else "inactive"
 
-            fig, axs = plt.subplots(1, 1, figsize=(5, 5))
+            fig, axs = plt.subplots(1, 2, figsize=(10, 5))
 
+            # Plot the actual image at W096
+            ct2f_actual_alpha = ct2f_actual.copy()
+            ct2f_actual_alpha[ct2f_actual_alpha <= alpha_threshold] = 0
+            ct2f_actual_alpha[ct2f_actual_alpha > alpha_threshold] = 1
+            axs[0].imshow(flair_actual, cmap='gray')
+            axs[0].imshow(ct2f_actual, cmap=green_cmap, alpha=ct2f_actual_alpha)
+            axs[0].axis('off')
+            
             # Plot the predicted image at W096
             ct2f_pred_alpha = ct2f_pred.copy()
             ct2f_pred_alpha[ct2f_pred_alpha <= alpha_threshold] = 0
             ct2f_pred_alpha[ct2f_pred_alpha > alpha_threshold] = 1
-            axs.imshow(flair_pred, cmap='gray')
-            axs.imshow(ct2f_pred, cmap=green_cmap, alpha=ct2f_pred_alpha)
-            axs.axis('off')
+            axs[1].imshow(flair_pred, cmap='gray')
+            axs[1].imshow(ct2f_pred, cmap=green_cmap, alpha=ct2f_pred_alpha)
+            axs[1].axis('off')
                 
             # Set top row title
             fig.suptitle(f"Patient status: {activity}", fontsize=16)
@@ -109,7 +125,7 @@ def ipmsa_plotter(output_dir: str, batches: list, samples: list, epoch: int, pro
 
     return image_path
 
-def main():
+def main(active_label=True):
     global config
     config = TrainingConfig()
 
@@ -153,12 +169,6 @@ def main():
         if config.wavelet_transform:
             images = wavelet_dec_2(images) / 2 # Keep in range [-1, 1]
 
-        # Activity data
-        newt2_w048 = x[MRIImageKeys.NEWT2][1]/2 + 0.5
-        newt2_w096 = x[MRIImageKeys.NEWT2][2]/2 + 0.5
-        newt2 = (newt2_w048 + newt2_w096).clamp(0,1)
-        active_label = torch.sum(newt2) > 0
-
         # Make prompt for patient
         prompt = int(active_label)
 
@@ -182,28 +192,35 @@ def main():
     val_loader = ipmsa.get_val_loader()
     test_loader = ipmsa.get_test_loader()
 
-    # Define model
-    dit = DiT(
-        num_attention_heads=6,
-        attention_head_dim=64,
+    # Define model - somewhat aligned with simple diffusion ImageNet 128 model
+    unet = UNetCondition2D(
+        sample_size=config.image_size if not config.wavelet_transform else config.image_size//2,
         in_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
         out_channels=config.image_channels if not config.wavelet_transform else 4*config.image_channels,
-        num_layers=12,
-        dropout=0.0,
-        norm_num_groups=32,
-        attention_bias=True,
-        sample_size=config.image_size if not config.wavelet_transform else config.image_size//2,
-        patch_size=config.patch_size,
-        activation_fn="gelu-approximate",
-        num_embeds_ada_norm=1000,
-        upcast_attention=False,
-        norm_type="ada_norm_zero",
-        norm_elementwise_affine=False,
-        norm_eps=1e-5,
+        layers_per_block=(2, 2, 4, 4, 4),  # how many ResNet layers to use per UNet block
+        block_out_channels=(128, 256, 256, 512, 768),  # the number of output channels for each UNet block
+        down_block_types=(
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "CrossAttnDownBlock2D",
+            "CrossAttnDownBlock2D",
+        ),
+        up_block_types=(
+            "CrossAttnUpBlock2D",
+            "CrossAttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+        mid_block_type="UNetMidBlock2DCrossAttn",
+        encoder_hid_dim=256,
+        encoder_hid_dim_type='text_proj',
+        cross_attention_dim=256
     )
 
     # Define optimizer and scheduler
-    optimizer = torch.optim.Adam(dit.parameters(), lr=config.learning_rate)
+    optimizer = torch.optim.Adam(unet.parameters(), lr=config.learning_rate)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=config.lr_warmup_steps,
@@ -212,22 +229,24 @@ def main():
 
     # Create the diffusion classifier object
     diffusion_classifier = DiffusionClassifier(
-        backbone=dit,
+        backbone=unet,
         config=config,
     )
 
-    metrics = [Accuracy("accuracy"), F1("f1"), Precision("precision"), Recall("recall")]
+    metrics=None
 
     # Train the model
-    diffusion_classifier.train_loop(
+    diffusion_classifier.inference(
         train_dataloader=train_loader,
-        val_dataloader=val_loader,
+        val_dataloader=test_loader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         metrics=metrics,
-        checkpoint_metric="f1",
-        plot_function=ipmsa_plotter
+        plot_function=ipmsa_plotter,
+        classification=config.classification,
+        from_t=0.5
     )
 
 if __name__ == "__main__":
-    main()
+    for active_label in [True, False]:
+        main(active_label=active_label)

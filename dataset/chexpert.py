@@ -46,12 +46,13 @@ class CheXpertDataset(Dataset):
         print(f"Label column name: {self.data.columns[1]}")
         
         # Get unique label and their counts from the polars dataframe
-        print(self.data.group_by("Lung Opacity").count().sort("Lung Opacity"))
+        print(self.data.group_by("Pleural Effusion").count().sort("Pleural Effusion"))
 
     def transforms(self):
         return transforms.Compose([
-            transforms.Resize((256,256)),
+            transforms.Resize((64,64)),
             transforms.ToTensor(),
+            transforms.Normalize(0.5, 0.5)
     ])
 
     def _filter_study1_frontal(self):
@@ -61,16 +62,16 @@ class CheXpertDataset(Dataset):
         # Filter for Study1 frontal images
         study1_frontal = df.filter(pl.col("Path").str.contains("study1/view1_frontal.jpg"))
 
-        # Keep only relevant columns (Path and Lung Opacity label)
-        study1_frontal = study1_frontal.select(["Path", "Lung Opacity"])
+        # Keep only relevant columns (Path and Pleural Effusion label)
+        study1_frontal = study1_frontal.select(["Path", "Pleural Effusion"])
 
         # Replace NaN labels with 0
         study1_frontal = study1_frontal.with_columns(
-            pl.col("Lung Opacity").fill_null(0)
+            pl.col("Pleural Effusion").fill_null(0)
         )
 
         # Drop rows where label is -1
-        study1_frontal = study1_frontal.filter(pl.col("Lung Opacity") != -1)
+        study1_frontal = study1_frontal.filter(pl.col("Pleural Effusion") != -1)
 
         return study1_frontal
 
@@ -83,7 +84,7 @@ class CheXpertDataset(Dataset):
         rel_path = row["Path"].item().split("/")[1:]
         rel_path = os.path.join(*rel_path)
         img_path = os.path.join(self.data_path, rel_path)
-        label = int(row["Lung Opacity"].item())
+        label = int(row["Pleural Effusion"].item())
 
         # Load image
         image = Image.open(img_path).convert("RGB")
@@ -92,7 +93,7 @@ class CheXpertDataset(Dataset):
         image = self.transforms()(image)
 
         if self.wavelet_transform:
-            image = wavelet_dec_2(image) / 2 # Keep in range [-1, 1]
+            image = wavelet_dec_2(image) / 2 # Keep in range [-1, 1])
 
         return image, label
     

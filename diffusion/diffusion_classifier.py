@@ -197,7 +197,7 @@ class DiffusionClassifier(nn.Module):
         return mu, variance
     
     @torch.no_grad()
-    def sample(self, x, text=None):
+    def sample(self, x, text=None, from_t=1):
         """
         Standard DDPM sampling procedure. Begun by sampling z_T ~ N(0, 1)
         and then repeatedly sampling z_s ~ p(z_s | z_t)
@@ -208,7 +208,14 @@ class DiffusionClassifier(nn.Module):
         Returns:
         x_pred (torch.Tensor): The predicted tensor.
         """
-        z_t = torch.randn(x.shape).to(x.device)
+        if from_t == 1:
+            z_t = torch.randn(x.shape).to(x.device)
+        else:
+            t = torch.ones(x.shape[0]) * from_t
+            logsnr_t = self.schedule(t).to(x.device)
+            alpha_t = torch.sqrt(torch.sigmoid(logsnr_t)).view(-1, 1, 1, 1).to(x.device)
+            sigma_t = torch.sqrt(torch.sigmoid(-logsnr_t)).view(-1, 1, 1, 1).to(x.device)
+            z_t, _ = self.diffuse(x, alpha_t, sigma_t)
 
         # Get embeddings (and null embeddings) if text is provided
         if text is not None and self.encoder_type is not None:
@@ -271,9 +278,6 @@ class DiffusionClassifier(nn.Module):
         x_pred, _ = self.ddpm_sampler_step(z_t, pred, u_pred, logsnr_1.clone().detach(), logsnr_0.clone().detach())
         
         x_pred = self.clip(x_pred)
-
-        # Convert x_pred to the range [0, 1]
-        x_pred = (x_pred + 1) / 2
 
         return x_pred
     
@@ -518,7 +522,8 @@ class DiffusionClassifier(nn.Module):
         val_dataloader, 
         stop_idx=None,
         metrics=None,
-        classification=False
+        classification=False,
+        from_t=1
     ):
         """
         A function to evaluate the model.
@@ -542,7 +547,7 @@ class DiffusionClassifier(nn.Module):
             x = batch["images"]
             p = batch["prompt"] if "prompt" in batch.keys() else None
             
-            sample = self.classify(x, p, fast=self.config.fast_classification) if classification else self.sample(x, p)
+            sample = self.classify(x, p, fast=self.config.fast_classification) if classification else self.sample(x, p, from_t)
                         
             # Update the metrics
             if metrics is not None:
@@ -559,6 +564,7 @@ class DiffusionClassifier(nn.Module):
 
         return val_samples, batches, metrics
     
+    # TODO - fix parameters because some of them are just config.something
     @torch.no_grad()
     def inference(
         self, 
@@ -568,7 +574,9 @@ class DiffusionClassifier(nn.Module):
         lr_scheduler, 
         metrics=None,
         plot_function=None,
-        classification=False
+        classification=False,
+        from_t=1,
+        checkpoint_folder="checkpoints"
     ):
         """
         A function to perform inference.
@@ -580,6 +588,8 @@ class DiffusionClassifier(nn.Module):
         lr_scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler.
         metrics (list): A list of metrics to evaluate.
         plot_function (function): The function to use for plotting the samples.
+        classification (bool): Whether to perform classification.
+        from_t (int): The timepoint to start sampling from (default is 1).
         """
 
         # Make directory for saving images
@@ -596,18 +606,20 @@ class DiffusionClassifier(nn.Module):
             self.encoder = accelerator.prepare(self.encoder)
         
         # Load most recent checkpoint
-        checkpoint_path = os.path.join(self.config.experiment_path, "checkpoints")
+        checkpoint_path = os.path.join(self.config.experiment_path, checkpoint_folder)
         self.load_checkpoint(checkpoint_path, accelerator)
 
         if metrics is not None:
             for metric in metrics:
                 metric.set_device(accelerator.device)
 
+        # TODO - metrics, classification, image sampling needs to be in a state machine
         val_samples, batches, metrics = self.evaluate(
                                             val_dataloader, 
                                             metrics=metrics,
                                             stop_idx=self.config.evaluation_batches,
-                                            classification=classification
+                                            classification=classification,
+                                            from_t=from_t
                                         )
         
         metric_output = []

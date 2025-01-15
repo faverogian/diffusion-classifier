@@ -6,6 +6,11 @@ venv*/
 
 # checkpoints
 **/checkpoints*/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.bin
 
 # cache
 *.pyc
