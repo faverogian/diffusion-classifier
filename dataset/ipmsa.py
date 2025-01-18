@@ -4,9 +4,8 @@ from glob import glob
 import lz4.frame
 import numpy as np
 import pickle
-import torchvision.transforms as transforms
 import torch.nn.functional as F
-import time
+import pickle
 
 class MRIImageKeys:
     '''
@@ -66,9 +65,9 @@ def glob_file(filepath_no_ext: str)->str:
     return files[0]
 
 class IPMSADataset(torch.utils.data.Dataset):
-    def __init__(self, VolumeLoaderPath: str, slurm: bool=False, num_samples: int=None):
-
+    def __init__(self, VolumeLoaderPath: str, slurm: bool = False, num_samples: int = None, cache_dir: str = None):
         self.VolumeLoaderPath = VolumeLoaderPath
+        self.cache_dir = cache_dir
 
         with open(VolumeLoaderPath, 'rb') as f:
             dictionary = pickle.load(f)
@@ -77,6 +76,7 @@ class IPMSADataset(torch.utils.data.Dataset):
             self.rootdir_dict = {'MRI_AND_LABEL': os.environ['TMPDIR'], 'CLINICAL': os.environ['TMPDIR']}
         else:   
             self.rootdir_dict = {'MRI_AND_LABEL': os.environ['DATA_PATH'], 'CLINICAL': os.environ['DATA_PATH']}
+        
         self.dataset_dict = dictionary['dataset_dict']
         self.item_template = dictionary['item_template']
         self.sample_keys = list(self.dataset_dict.keys())
@@ -86,8 +86,12 @@ class IPMSADataset(torch.utils.data.Dataset):
 
         self.transform = None
 
-        self._validate_inputs()
+        # Create cache directory if it doesn't exist
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
 
+        self._validate_inputs()
+    
     def _validate_inputs(self):
         # Check if rootdir_dict has paths
         for rootdir in self.rootdir_dict.values():
@@ -120,9 +124,16 @@ class IPMSADataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.sample_keys)
-    
+
     def set_transform(self, transform):
         self.transform = transform
+
+    def _get_cache_path(self, idx):
+        """Get the cache path for a sample."""
+        sample_key = self.sample_keys[idx]
+        if self.cache_dir:
+            return os.path.join(self.cache_dir, f"{sample_key}.pkl")
+        return None
 
     def _load_vol(self, idx):
         sample_key = self.sample_keys[idx]
@@ -158,20 +169,36 @@ class IPMSADataset(torch.utils.data.Dataset):
         return output, filepaths
     
     def __getitem__(self, idx):
+        cache_path = self._get_cache_path(idx)
+
+        if cache_path and os.path.exists(cache_path):
+            # Load preprocessed data from cache
+            with open(cache_path, 'rb') as f:
+                cached_data = pickle.load(f)
+            return cached_data
+
+        # Load and preprocess data if not cached
         output, filepaths = self._load_vol(idx)
 
-        # Get trial and patient ID from first filepath
+        # Get trial and patient ID from the first filepath
         filepaths = filepaths[list(filepaths.keys())[0]]
         trial_id = filepaths[0].split('/')[3]
         patient_id = filepaths[0].split('/')[4]
-        idx = {'trial_id': trial_id, 'patient_id': patient_id}
-        
+        idx_info = {'trial_id': trial_id, 'patient_id': patient_id}
+
         if self.transform is not None:
-            output = self.transform({'output': output, 'idx': idx})
+            preprocessed_data = self.transform({'output': output, 'idx': idx_info})
+
+            # Save preprocessed data to cache
+            if cache_path:
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(preprocessed_data, f)
+
+            return preprocessed_data
 
         return output
     
-    def remove_condition(self, block_list):
+    def remove_condition(self, block_list, name='filtered'):
         """
         Removes samples that do not meet the condition specified by condition_func.
 
@@ -205,7 +232,7 @@ class IPMSADataset(torch.utils.data.Dataset):
         self.dataset_dict = {key: val for i, (key, val) in enumerate(self.dataset_dict.items()) if i not in inactive_idxs}
 
         # Save updated dataset to a new pickle file
-        output_path = self.VolumeLoaderPath.replace('.pkl', '_filtered.pkl')
+        output_path = self.VolumeLoaderPath.replace('.pkl', f'_{name}.pkl')
         data = {
             'rootdir_dict': self.rootdir_dict,
             'dataset_dict': self.dataset_dict,
@@ -432,45 +459,7 @@ class LORISTransforms:
                 MRI_image[key] = MRI
 
             return MRI_image
-            
-    class SegmentBrain:
-        '''
-        Segments the (GM+WM, CSF) regions from the FLAIR image using a threshold.
-
-        Args:
-            MRI_image (dict): A dictionary containing the MRI image with keys
-            ['FLAIR'], ['GAD'], ['CT2F'] ... ['MASK'] ... ['CLINICAL'].
-
-        Returns:
-            MRI_image (dict): A dictionary containing one extra key ['BRAIN'].
-        '''
-        def __call__(self, MRI_image):
-            segmentations = []
-            for key in MRI_image.keys():
-                if key != MRIImageKeys.FLAIR:
-                    continue
-
-                MRI = MRI_image[key] / 2 + 0.5 # [0, 1]
-
-                for image in MRI:
-                    image = image.squeeze()
-                    ants_image = ants.from_numpy(image)
-                    mask = ants.get_mask(ants_image)
-                    segmentation = ants.atropos(a=ants_image, m='[0.8,1x1]', c='[1,0]', i='kmeans[2]', x=mask)
-                    segmentation = segmentation["segmentation"]
-
-                    # Convert to numpy array
-                    segmentation = segmentation.numpy()
-
-                    # Add segmentation to list
-                    segmentations.append(segmentation)
-
-            segmentation = np.stack(segmentations)
-
-            # Add segmentation to dict
-            MRI_image['BRAIN'] = segmentation
-
-            return MRI_image
+        
 
     class BlurLabel2D:
         '''
@@ -587,7 +576,7 @@ class LORISTransforms:
             return MRI_image
         
 class IPMSADataLoader:
-    def __init__(self, train_data_path, val_data_path, test_data_path, collate_fn, slurm=0, batch_size=64, num_workers=4):
+    def __init__(self, train_data_path, val_data_path, test_data_path, collate_fn, slurm=0, batch_size=64, num_workers=4, cache_dir=None):
         self.train_data_path = train_data_path
         self.val_data_path = val_data_path
         self.test_data_path = test_data_path
@@ -595,9 +584,9 @@ class IPMSADataLoader:
         self.num_workers = num_workers
 
         # Initialize datasets
-        self.train_dataset = IPMSADataset(train_data_path, slurm=slurm)
-        self.val_dataset = IPMSADataset(val_data_path, slurm=slurm)
-        self.test_dataset = IPMSADataset(test_data_path, slurm=slurm)
+        self.train_dataset = IPMSADataset(train_data_path, slurm=slurm, cache_dir=cache_dir)
+        self.val_dataset = IPMSADataset(val_data_path, slurm=slurm, cache_dir=cache_dir)
+        self.test_dataset = IPMSADataset(test_data_path, slurm=slurm, cache_dir=cache_dir)
 
         # Set the transform for the datasets
         self.train_dataset.set_transform(collate_fn)
