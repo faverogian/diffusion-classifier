@@ -47,6 +47,14 @@ class DiffusionClassifier(nn.Module):
         assert isinstance(backbone, nn.Module), "Model must be an instance of torch.nn.Module."
         self.model = backbone
 
+        # EMA version of the model
+        self.ema = EMA(
+            self.model,
+            beta=config.ema_beta,
+            update_after_step=config.ema_warmup,
+            update_every=config.ema_update_freq,
+        )
+
         # Optional encoder setup
         self.encoder_type = self.config.encoder_type
         if self.encoder_type == 't5':
@@ -68,6 +76,9 @@ class DiffusionClassifier(nn.Module):
         # Lock the parameters of the encoder - Disable for end-to-end training
         if self.encoder_type in ['t5']:
             self.encoder.requires_grad_(False)
+
+        # Print the number of parameters in self.model
+        print(f"Parameter count: {sum(p.numel() for p in self.model.parameters())}")
 
     def encode_text_prompt(self, text):
         """
@@ -230,7 +241,7 @@ class DiffusionClassifier(nn.Module):
             null_embeddings = None
 
         # Create evenly spaced steps, e.g., for sampling_steps=5 -> [1.0, 0.8, 0.6, 0.4, 0.2]
-        steps = torch.linspace(1.0, 0.0, self.config.sampling_steps + 1)
+        steps = torch.linspace(from_t, 0.0, self.config.sampling_steps + 1)
 
         for i in range(len(steps) - 1):  # Loop through steps, but stop before the last element
             
@@ -241,14 +252,14 @@ class DiffusionClassifier(nn.Module):
             logsnr_s = self.schedule(u_s).to(x.device).unsqueeze(0)
 
             # Conditional sample
-            pred = self.model(
+            pred = self.ema(
                 z_t, 
                 logsnr_t,
                 encoder_hidden_states=text_embeddings
                 )
 
             # Unconditional sample
-            u_pred = self.model(
+            u_pred = self.ema(
                 z_t, 
                 logsnr_t,
                 encoder_hidden_states=null_embeddings
@@ -262,14 +273,14 @@ class DiffusionClassifier(nn.Module):
         logsnr_0 = self.schedule(steps[-1]).to(x.device).unsqueeze(0)
 
         # Conditional sample
-        pred = self.model(
+        pred = self.ema(
             z_t, 
             logsnr_1,
             encoder_hidden_states=text_embeddings
             )
 
         # Unconditional sample
-        u_pred = self.model(
+        u_pred = self.ema(
             z_t,
             logsnr_1,
             encoder_hidden_states=null_embeddings
@@ -368,22 +379,24 @@ class DiffusionClassifier(nn.Module):
         )
         
         # Prepare the model, optimizer, dataloaders, and learning rate scheduler
-        model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
-            self.model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+        model, ema, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
+            self.model, self.ema, optimizer, train_dataloader, val_dataloader, lr_scheduler
         )
         if self.encoder_type == 'nn': # Learnable embeddings require separate preparation than pretrained models
             self.encoder = accelerator.prepare(self.encoder)
 
         # Ensure metrics are on the correct device
         if metrics is not None:
-            checkpoint_tracker = {'value': 0, 'save_flag': False}
+            checkpoint_tracker = {'value': 0.0, 'save_flag': False}
             for metric in metrics:
                 metric.set_device(accelerator.device)
+        else:
+            checkpoint_tracker = None
 
         # Check if resume training is enabled
         if self.config.resume:
             checkpoint_path = os.path.join(self.config.experiment_path, "checkpoints")
-            start_epoch, experiment_key = self.load_checkpoint(checkpoint_path, accelerator)
+            start_epoch, checkpoint_tracker['value'], experiment_key = self.load_checkpoint(checkpoint_path, accelerator)
             if experiment_key is not None and self.config.use_comet and accelerator.is_main_process:
                 experiment = ExistingExperiment(
                     previous_experiment=experiment_key,
@@ -436,6 +449,8 @@ class DiffusionClassifier(nn.Module):
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
+
+                    self.ema.update()
 
             epoch_elapsed = time.time() - epoch_start_time
             if accelerator.is_main_process:
@@ -504,7 +519,7 @@ class DiffusionClassifier(nn.Module):
                 val_evaluation_elapsed = time.time() - val_evaluation_start_time
                 if accelerator.is_main_process:
                     if (checkpoint_metric is not None): 
-                        self.save_checkpoint(accelerator, epoch, experiment, best=checkpoint_tracker['save_flag'])
+                        self.save_checkpoint(accelerator, epoch, experiment, checkpoint_tracker)
                     else:
                         self.save_checkpoint(accelerator, epoch, experiment)
 
@@ -597,8 +612,8 @@ class DiffusionClassifier(nn.Module):
         # Make accelerator wrapper
         accelerator = Accelerator()
 
-        model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
-            self.model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+        model, ema, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare( 
+            self.model, self.ema, optimizer, train_dataloader, val_dataloader, lr_scheduler
         )
         if self.encoder_type == 'nn': # Learnable embeddings require separate preparation than pretrained models
             self.encoder = accelerator.prepare(self.encoder)
@@ -612,6 +627,7 @@ class DiffusionClassifier(nn.Module):
                 metric.set_device(accelerator.device)
 
         # TODO - metrics, classification, image sampling needs to be in a state machine
+        model.eval()
         val_samples, batches, metrics = self.evaluate(
                                             val_dataloader, 
                                             metrics=metrics,
@@ -667,7 +683,7 @@ class DiffusionClassifier(nn.Module):
             stage_start = evaluation_per_stage[i]
             stage_end = evaluation_per_stage[i + 1]
 
-            for j in range(stage_start, stage_end):
+            for j in tqdm(range(stage_start, stage_end)):
                 # Sampling timepoint t and image at time t
                 t = torch.rand(BS)
                 logsnr_t = self.schedule(t).to(x.device)
@@ -681,7 +697,7 @@ class DiffusionClassifier(nn.Module):
                     text_embeddings = self.encode_text_prompt(text)
                     text_embeddings = text_embeddings.to(x.device)
 
-                    pred = self.model(
+                    pred = self.ema(
                         x=z_t, 
                         noise_labels=logsnr_t,
                         encoder_hidden_states=text_embeddings,
@@ -708,7 +724,7 @@ class DiffusionClassifier(nn.Module):
 
         return classes[:, 0]
     
-    def save_checkpoint(self, accelerator: Accelerator, epoch, experiment, best=False):
+    def save_checkpoint(self, accelerator: Accelerator, epoch, experiment, checkpoint_tracker=None):
         """
         Saves the model checkpoint.
 
@@ -727,7 +743,8 @@ class DiffusionClassifier(nn.Module):
         # Save experiment state
         experiment_state = {
             'epoch': epoch + 1,
-            'experiment_key': experiment.get_key() if experiment is not None else None
+            'best_metric': checkpoint_tracker['value'] if checkpoint_tracker is not None else None,
+            'experiment_key': experiment.get_key() if experiment is not None else None,
         }
 
         # Save new checkpoint
@@ -737,6 +754,7 @@ class DiffusionClassifier(nn.Module):
         print(f"Checkpoint saved to {latest_exp_state_path}")
 
         # Save best checkpoint if necessary
+        best = checkpoint_tracker['save_flag'] if checkpoint_tracker is not None else False
         if best:
             best_checkpoint_dir = os.path.join(self.config.experiment_path, "best_checkpoint")
             os.makedirs(best_checkpoint_dir, exist_ok=True)  # Ensure directory exists
@@ -773,9 +791,15 @@ class DiffusionClassifier(nn.Module):
         # Restore the epoch to resume training from
         epoch = checkpoint['epoch']
 
+        # Restore the best metric value
+        try:
+            best_metric = checkpoint['best_metric']
+        except:
+            best_metric = None
+
         # Optionally, resume the experiment from Comet (if using Comet for tracking)
         experiment_key = checkpoint['experiment_key']
 
-        print(f"Checkpoint loaded. Resuming from epoch {epoch}.")
+        print(f"Checkpoint loaded. Resuming from epoch {epoch}. Best metric {best_metric}")
 
-        return epoch, experiment_key
+        return epoch, best_metric, experiment_key

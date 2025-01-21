@@ -6,7 +6,7 @@ def wavelet_dec_2(images):
     Perform a one-level wavelet decomposition on a tensor [C, H, W].
     """
     # On every channel in a batch, perform a DWT
-    wavelet = 'db1' # Daubechies wavelet
+    wavelet = 'haar' # Daubechies wavelet
 
     # Get the number of channels
     num_channels = images.shape[0]
@@ -39,7 +39,7 @@ def wavelet_enc_2(wavelet_images):
     Perform a one-level wavelet reconstruction on a tensor [4*C, H, W].
     """
     # On every channel in a batch, perform a DWT
-    wavelet = 'db1' # Daubechies wavelet
+    wavelet = 'haar' # Daubechies wavelet
 
     # Get the number of channels
     num_channels = wavelet_images.shape[0] // 4
